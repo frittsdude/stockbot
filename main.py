@@ -1,100 +1,101 @@
-import os
-import requests
 from flask import Flask, request, jsonify
+import requests
 
 app = Flask(__name__)
 
-# Get Alpha Vantage key from environment, or use fallback
-ALPHA_KEY = os.getenv("ALPHA_KEY", "FZTRK2YCAJQIWTM1")
+# --- Simple in-memory watchlist ---
+watchlist = []
 
-# In-memory watchlist (simple demo, clears if app restarts)
-watchlist = set()
-
-
-@app.route("/")
-def home():
-    return "StockBot is up. Use /price in Slack."
+# --- Dummy stock price fetcher (replace with real API) ---
+def get_stock_price(ticker):
+    # Example using Yahoo Finance API (or any other provider)
+    # For now, we'll just return a fake number so it runs.
+    return round(100 + hash(ticker) % 50 + 0.01 * (hash(ticker) % 100), 2)
 
 
-@app.route("/slack/price", methods=["POST"])
+# --- Slash command: /price TICKER ---
+@app.route('/slack/price', methods=['POST'])
 def price():
-    text = request.form.get("text", "").strip().upper()
+    ticker = request.form.get('text', '').strip().upper()
+    if not ticker:
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": "⚠️ Please provide a ticker, e.g. `/price AAPL`"
+        })
+
+    price = get_stock_price(ticker)
+    return jsonify({
+        "response_type": "in_channel",   # visible to everyone
+        "text": f"{ticker}: ${price}"
+    })
+
+
+# --- Slash command: /watchlist add/remove/show ---
+@app.route('/slack/watchlist', methods=['POST'])
+def watchlist_cmd():
+    text = request.form.get('text', '').strip().split()
     if not text:
-        return jsonify(
-            response_type="ephemeral",
-            text="Please provide a ticker, e.g. `/price AAPL`"
-        )
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": "⚠️ Usage: `/watchlist add TICKER`, `/watchlist remove TICKER`, or `/watchlist show`"
+        })
 
-    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={text}&apikey={ALPHA_KEY}"
-    r = requests.get(url)
-    data = r.json().get("Global Quote", {})
+    action = text[0].lower()
 
-    if "05. price" not in data:
-        return jsonify(response_type="ephemeral", text=f"{text}: (no data)")
+    if action == "add" and len(text) > 1:
+        ticker = text[1].upper()
+        if ticker not in watchlist:
+            watchlist.append(ticker)
+            return jsonify({
+                "response_type": "in_channel",
+                "text": f"✅ Added {ticker} to the watchlist."
+            })
+        else:
+            return jsonify({
+                "response_type": "ephemeral",
+                "text": f"{ticker} is already on the watchlist."
+            })
 
-    price = float(data["05. price"])
-    change = float(data["09. change"])
-    change_percent = data["10. change percent"]
-
-    return jsonify(
-        response_type="in_channel",  # visible to everyone
-        text=f"{text}: ${price:.2f} (Δ {change:.4f}, {change_percent})"
-    )
-
-
-@app.route("/slack/watchlist", methods=["POST"])
-def manage_watchlist():
-    text = request.form.get("text", "").strip().upper()
-    parts = text.split()
-
-    if not parts:
-        return jsonify(
-            response_type="ephemeral",
-            text="Usage: `/watchlist add TICKER`, `/watchlist remove TICKER`, `/watchlist list`"
-        )
-
-    cmd = parts[0]
-
-    if cmd == "ADD" and len(parts) > 1:
-        ticker = parts[1]
-        watchlist.add(ticker)
-        return jsonify(
-            response_type="in_channel",
-            text=f"✅ Added {ticker} to the watchlist."
-        )
-
-    elif cmd == "REMOVE" and len(parts) > 1:
-        ticker = parts[1]
+    elif action == "remove" and len(text) > 1:
+        ticker = text[1].upper()
         if ticker in watchlist:
             watchlist.remove(ticker)
-            return jsonify(
-                response_type="in_channel",
-                text=f"❌ Removed {ticker} from the watchlist."
-            )
+            return jsonify({
+                "response_type": "in_channel",
+                "text": f"🗑️ Removed {ticker} from the watchlist."
+            })
         else:
-            return jsonify(
-                response_type="ephemeral",
-                text=f"{ticker} was not in the watchlist."
-            )
+            return jsonify({
+                "response_type": "ephemeral",
+                "text": f"{ticker} is not on the watchlist."
+            })
 
-    elif cmd == "LIST":
+    elif action == "show":
         if not watchlist:
-            return jsonify(
-                response_type="ephemeral",
-                text="Watchlist is empty."
-            )
-        return jsonify(
-            response_type="in_channel",
-            text="📊 Watchlist: " + ", ".join(sorted(watchlist))
-        )
+            return jsonify({
+                "response_type": "in_channel",
+                "text": "📭 The watchlist is empty."
+            })
+        prices = [f"{t}: ${get_stock_price(t)}" for t in watchlist]
+        return jsonify({
+            "response_type": "in_channel",
+            "text": "📈 Current Watchlist:\n" + "\n".join(prices)
+        })
 
     else:
-        return jsonify(
-            response_type="ephemeral",
-            text="Invalid command. Use `/watchlist add TICKER`, `/watchlist remove TICKER`, or `/watchlist list`."
-        )
+        return jsonify({
+            "response_type": "ephemeral",
+            "text": "⚠️ Invalid command. Try `/watchlist add TICKER`, `/watchlist remove TICKER`, or `/watchlist show`."
+        })
+
+
+# --- Home route just to confirm it's running ---
+@app.route('/')
+def home():
+    return "StockBot is running!"
 
 
 if __name__ == "__main__":
-    # Render assigns PORT automatically
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
