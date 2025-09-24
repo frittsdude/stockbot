@@ -3,6 +3,7 @@ modules = ["python-3.11"]
 
 [nix]
 channel = "stable-25_05"
+packages = ["graphicsmagick-imagemagick-compat"]
 
 [unitTest]
 language = "python3"
