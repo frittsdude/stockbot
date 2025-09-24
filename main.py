@@ -1,117 +1,100 @@
+import os
 import requests
 from flask import Flask, request, jsonify
 
-ALPHA_KEY = "FZTRK2YCAJQIWTM1"
 app = Flask(__name__)
 
-# simple in-memory watchlist (per app; resets on restart)
+# Get Alpha Vantage key from environment, or use fallback
+ALPHA_KEY = os.getenv("ALPHA_KEY", "FZTRK2YCAJQIWTM1")
+
+# In-memory watchlist (simple demo, clears if app restarts)
 watchlist = set()
 
-# ---------- helpers ----------
-def quote_line(ticker: str, timeout=2.5) -> str:
-    try:
-        r = requests.get(
-            "https://www.alphavantage.co/query",
-            params={"function": "GLOBAL_QUOTE", "symbol": ticker, "apikey": ALPHA_KEY},
-            timeout=timeout,
-        )
-        q = r.json().get("Global Quote", {})
-        px = q.get("05. price")
-        if not px:
-            return f"{ticker}: (no data)"
-        chg = q.get("09. change", "—")
-        pct = q.get("10. change percent", "—")
-        return f"*{ticker}*: ${float(px):.2f}  (Δ {chg}, {pct})"
-    except Exception:
-        return f"{ticker}: (timeout/error)"
 
-def render_quotes(tickers):
-    tickers = [t.upper() for t in tickers][:8]
-    lines = [quote_line(t) for t in tickers]
-    return "\n".join(lines) if lines else "No valid tickers."
+@app.route("/")
+def home():
+    return "StockBot is up. Use /price in Slack."
 
-def public(text: str):
-    """Slack public message (visible to channel)."""
-    return jsonify({"response_type": "in_channel", "text": text})
 
-def private(text: str):
-    """Private (ephemeral) message to the user."""
-    return jsonify({"response_type": "ephemeral", "text": text})
-
-# ---------- routes ----------
-@app.get("/")
-def health():
-    return "StockBot is up. Use /price or /watchlist in Slack."
-
-@app.get("/slack/ping")
-def ping():
-    return "pong"
-
-# /price AAPL TSLA
-@app.route("/slack/price", methods=["POST", "GET"])
+@app.route("/slack/price", methods=["POST"])
 def price():
-    # Allow manual GET testing via browser: .../slack/price?text=AAPL TSLA
-    if request.method == "GET":
-        text = (request.args.get("text") or "").strip()
-        if not text:
-            return "Usage: /price TICKER or /price AAPL TSLA"
-        return render_quotes(text.split())
-
-    # Slack POST
-    text = (request.form.get("text") or "").strip()
+    text = request.form.get("text", "").strip().upper()
     if not text:
-        # keep usage hints private, everything else public
-        return private("Usage: `/price TICKER` or `/price AAPL TSLA`")
-    result = render_quotes(text.split())
-    return public(result)
+        return jsonify(
+            response_type="ephemeral",
+            text="Please provide a ticker, e.g. `/price AAPL`"
+        )
 
-# /watchlist add TICKER | remove TICKER | list
-@app.route("/slack/watchlist", methods=["POST", "GET"])
-def handle_watchlist():
-    # GET for quick browser tests: .../slack/watchlist?text=list
-    if request.method == "GET":
-        text = (request.args.get("text") or "").strip()
-        return _watchlist_logic(text, public_for_get=False)
+    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={text}&apikey={ALPHA_KEY}"
+    r = requests.get(url)
+    data = r.json().get("Global Quote", {})
 
-    # Slack POST → public
-    text = (request.form.get("text") or "").strip()
-    return _watchlist_logic(text, public_for_get=True)
+    if "05. price" not in data:
+        return jsonify(response_type="ephemeral", text=f"{text}: (no data)")
 
-def _watchlist_logic(text: str, public_for_get: bool):
+    price = float(data["05. price"])
+    change = float(data["09. change"])
+    change_percent = data["10. change percent"]
+
+    return jsonify(
+        response_type="in_channel",  # visible to everyone
+        text=f"{text}: ${price:.2f} (Δ {change:.4f}, {change_percent})"
+    )
+
+
+@app.route("/slack/watchlist", methods=["POST"])
+def manage_watchlist():
+    text = request.form.get("text", "").strip().upper()
     parts = text.split()
+
     if not parts:
-        msg = "Usage: `/watchlist add TICKER`, `/watchlist remove TICKER`, `/watchlist list`"
-        # In Slack POSTs we can return private usage, but you asked for all public:
-        return public(msg) if public_for_get else msg
+        return jsonify(
+            response_type="ephemeral",
+            text="Usage: `/watchlist add TICKER`, `/watchlist remove TICKER`, `/watchlist list`"
+        )
 
-    cmd = parts[0].lower()
+    cmd = parts[0]
 
-    if cmd == "add" and len(parts) > 1:
-        for t in parts[1:]:
-            watchlist.add(t.upper())
-        msg = f"✅ Added: {' '.join([t.upper() for t in parts[1:]])}\nCurrent: {' '.join(sorted(watchlist)) or 'empty'}"
-        return public(msg) if public_for_get else msg
+    if cmd == "ADD" and len(parts) > 1:
+        ticker = parts[1]
+        watchlist.add(ticker)
+        return jsonify(
+            response_type="in_channel",
+            text=f"✅ Added {ticker} to the watchlist."
+        )
 
-    if cmd == "remove" and len(parts) > 1:
-        for t in parts[1:]:
-            watchlist.discard(t.upper())
-        msg = f"🗑 Removed: {' '.join([t.upper() for t in parts[1:]])}\nCurrent: {' '.join(sorted(watchlist)) or 'empty'}"
-        return public(msg) if public_for_get else msg
+    elif cmd == "REMOVE" and len(parts) > 1:
+        ticker = parts[1]
+        if ticker in watchlist:
+            watchlist.remove(ticker)
+            return jsonify(
+                response_type="in_channel",
+                text=f"❌ Removed {ticker} from the watchlist."
+            )
+        else:
+            return jsonify(
+                response_type="ephemeral",
+                text=f"{ticker} was not in the watchlist."
+            )
 
-    if cmd == "list":
+    elif cmd == "LIST":
         if not watchlist:
-            msg = "📭 Watchlist is empty. Add with `/watchlist add TICKER`"
-            return public(msg) if public_for_get else msg
-        msg = render_quotes(sorted(list(watchlist)))
-        return public(msg) if public_for_get else msg
+            return jsonify(
+                response_type="ephemeral",
+                text="Watchlist is empty."
+            )
+        return jsonify(
+            response_type="in_channel",
+            text="📊 Watchlist: " + ", ".join(sorted(watchlist))
+        )
 
-    # if user typed tickers without verb, treat as set/replace
-    tickers = [p.upper() for p in parts if p.strip()]
-    watchlist.clear()
-    for t in tickers:
-        watchlist.add(t)
-    msg = f"✅ Watchlist set: {' '.join(sorted(watchlist)) or 'empty'}"
-    return public(msg) if public_for_get else msg
+    else:
+        return jsonify(
+            response_type="ephemeral",
+            text="Invalid command. Use `/watchlist add TICKER`, `/watchlist remove TICKER`, or `/watchlist list`."
+        )
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3000)
+    # Render assigns PORT automatically
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
