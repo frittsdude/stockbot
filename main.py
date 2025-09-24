@@ -36,12 +36,16 @@ def fetch_quote(ticker: str, timeout=2.4):
 
 # -------- Delayed in-channel response via response_url --------
 def post_to_response_url(response_url: str, text: str):
+    if not response_url:
+        print("No response_url provided; cannot post follow-up.")
+        return
     try:
         requests.post(
             response_url,
             json={"response_type": "in_channel", "text": text},
             timeout=10,
         )
+        print("Posted follow-up to response_url.")
     except Exception as e:
         print("response_url post error:", e)
 
@@ -51,8 +55,9 @@ def home():
     return "StockBot is up. Use /price and /watchlist in Slack."
 
 # ===================== /price =====================
-def build_price_text(ticker: str) -> str:
-    q = fetch_quote(ticker)
+def build_price_text(ticker: str, bg_timeout=4.5):
+    # a bit more time in the background is fine
+    q = fetch_quote(ticker, timeout=bg_timeout)
     if not q:
         return f"{ticker.upper()}: (no data)"
     price, change, pct = q
@@ -62,6 +67,7 @@ def build_price_text(ticker: str) -> str:
 def cmd_price():
     text = (request.form.get("text") or "").strip()
     response_url = request.form.get("response_url")
+    print(f"/price invoked with text='{text}'")
 
     if not text:
         return jsonify(
@@ -69,17 +75,16 @@ def cmd_price():
             text="Usage: `/price AAPL`",
         ), 200
 
-    # Try fast path (finish < 3 seconds) so Slack shows the public message immediately
-    start = time.time()
+    # Fast path: try to finish within Slack's 3s window
     q = fetch_quote(text, timeout=2.4)
     if q:
         price, change, pct = q
-        return jsonify(
-            response_type="in_channel",
-            text=f"{text.upper()}: ${price:.2f} (Δ {change:.4f}, {pct})",
-        ), 200
+        msg = f"{text.upper()}: ${price:.2f} (Δ {change:.4f}, {pct})"
+        print("Fast path succeeded; responding in-channel directly.")
+        return jsonify(response_type="in_channel", text=msg), 200
 
-    # If it wasn't ready in time, ack quickly (ephemeral) and finish via response_url
+    # Fallback: return immediately, finish via response_url
+    print("Fast path missed; returning ephemeral and posting follow-up.")
     threading.Thread(
         target=lambda: post_to_response_url(response_url, build_price_text(text)),
         daemon=True,
@@ -87,12 +92,12 @@ def cmd_price():
     return jsonify(response_type="ephemeral", text="Working…"), 200
 
 # ===================== /watchlist =====================
-def build_watchlist_text() -> str:
+def build_watchlist_text():
     if not watchlist:
         return "📭 Watchlist is empty."
     lines = []
     for t in sorted(watchlist):
-        q = fetch_quote(t)
+        q = fetch_quote(t, timeout=4.5)
         if q:
             price, change, pct = q
             lines.append(f"{t}: ${price:.2f} (Δ {change:.4f}, {pct})")
@@ -104,6 +109,7 @@ def build_watchlist_text() -> str:
 def cmd_watchlist():
     parts = (request.form.get("text") or "").strip().split()
     response_url = request.form.get("response_url")
+    print(f"/watchlist invoked: parts={parts}")
 
     if not parts:
         return jsonify(
@@ -117,7 +123,6 @@ def cmd_watchlist():
     if action == "add" and tickers:
         for t in tickers:
             watchlist.add(t)
-        # public, immediate
         return jsonify(
             response_type="in_channel",
             text=f"✅ Added: {', '.join(tickers)}",
@@ -142,13 +147,11 @@ def cmd_watchlist():
         ), 200
 
     if action == "list":
-        # Listing can be slow (multiple quotes). Do delayed public post if needed.
-        # Try to do it fast; if not, fall back to response_url.
-        def do_list():
-            post_to_response_url(response_url, build_watchlist_text())
-
-        thread = threading.Thread(target=do_list, daemon=True)
-        thread.start()
+        print("Watchlist list: returning ephemeral, posting follow-up.")
+        threading.Thread(
+            target=lambda: post_to_response_url(response_url, build_watchlist_text()),
+            daemon=True,
+        ).start()
         return jsonify(response_type="ephemeral", text="Working…"), 200
 
     return jsonify(
@@ -158,5 +161,5 @@ def cmd_watchlist():
 
 # --------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
+    port = int(os.environ.get("PORT", 3000))  # Render provides PORT
     app.run(host="0.0.0.0", port=port)
